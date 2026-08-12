@@ -35,6 +35,7 @@ STOPWORD_TEXT = (
 )
 STOPWORDS = frozenset(STOPWORD_TEXT.split())
 SOURCE_REPEAT_DECAY = 0.9
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 ProgressCallback = Callable[[str], None]
 
 
@@ -266,6 +267,53 @@ class OpenAIGenerator:
         return answer
 
 
+class GeminiGenerator:
+    """Gemini backend reached through Google's OpenAI-compatible endpoint.
+
+    Only the generator changes; retrieval, chunking and the prompt stay exactly
+    as provided, so evaluation results remain comparable.
+
+    Every Gemini model still served is a thinking model, and its reasoning tokens
+    are billed against max_tokens. A 300-token budget leaves roughly a dozen
+    tokens for the visible answer and truncates it, so the budget is raised here.
+    """
+
+    def __init__(self, max_output_tokens: int = 1500) -> None:
+        api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        self.model = os.getenv("GEMINI_MODEL", "").strip()
+        base_url = os.getenv("GEMINI_BASE_URL", "").strip() or GEMINI_BASE_URL
+        if not api_key:
+            raise RuntimeError("GEMINI_API_KEY is missing from .env")
+        if not self.model:
+            raise RuntimeError("GEMINI_MODEL is missing from .env")
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.max_output_tokens = max_output_tokens
+
+    def generate(self, prompt: str) -> str:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=self.max_output_tokens,
+        )
+        if not response.choices:
+            raise RuntimeError("Gemini returned no choices")
+        answer = (response.choices[0].message.content or "").strip()
+        if not answer:
+            raise RuntimeError("Gemini returned an empty answer")
+        return answer
+
+
+def _default_generator() -> TextGenerator:
+    """Select the backend from whichever provider key is present in .env."""
+
+    if os.getenv("GEMINI_API_KEY", "").strip():
+        return GeminiGenerator()
+    if os.getenv("OPENAI_API_KEY", "").strip():
+        return OpenAIGenerator()
+    raise RuntimeError("Set GEMINI_API_KEY or OPENAI_API_KEY in .env")
+
+
 @dataclass(frozen=True)
 class DomainResponse:
     question: str
@@ -299,7 +347,7 @@ class DomainAssistant:
         return cls(
             corpus_id,
             BM25Retriever(chunks),
-            generator if generator is not None else OpenAIGenerator(),
+            generator if generator is not None else _default_generator(),
             top_k,
         )
 
